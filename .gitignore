@@ -1,0 +1,55 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+.eggs/
+*.log
+*.tmp
+*.swp
+*.swo
+*.DS_Store
+
+# --- Virtual environment ---
+venv/
+.env/
+ENV/
+env/
+.venv/
+
+# --- Secrets ---
+# dotenv file with API keys (keep out of git)
+*.env
+!.env.example
+
+# --- VS Code ---
+.vscode/
+.history/
+
+# --- Python packaging ---
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+.installed.cfg
+
+# --- Coverage / Testing ---
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+pytest_cache/
+.tox/
+.pytest_cache/
+.pyre/
+.mypy_cache/
+
+# --- Jupyter ---
+.ipynb_checkpoints

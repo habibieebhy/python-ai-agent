@@ -1,0 +1,11 @@
+# requirements.txt
+fastapi
+uvicorn[standard]
+openai
+python-dotenv
+httpx
+python-telegram-bot
+openai
+python-dotenv
+requests
+fastmcp
