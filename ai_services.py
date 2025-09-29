@@ -1,4 +1,4 @@
-# ai_services.py (Final Version with method call)
+# ai_services.py
 import os
 import json
 import logging
@@ -13,16 +13,14 @@ from dotenv import load_dotenv
 
 from fastmcp import Client
 
+from ai_prompt_helper import get_system_prompt # prompt helper function
+
 load_dotenv()
 
-# ... (All code from the top down to get_and_format_mcp_tools is unchanged)
-SYSTEM_PROMPT = (
-    "You are a helpful and friendly AI assistant. Your name is CemTemChat AI. "
-    "Keep your responses concise, friendly, and easy to understand. Do not mention that "
-    "you are an AI unless it is directly relevant to the conversation."
-)
+SYSTEM_PROMPT = get_system_prompt() # use the imported Prompt
+
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 YOUR_SITE_URL = os.getenv("YOUR_SITE_URL", "")
 YOUR_SITE_NAME = os.getenv("YOUR_SITE_NAME", "")
 FASTMCP_URL = os.getenv("FASTMCP_URL", "https://brixta-mycoco-mcp.fastmcp.app/mcp")
@@ -61,8 +59,8 @@ def setup_ai_service() -> Dict[str, Any]:
 def get_ai_completion(messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
     global _session
     if _session is None: raise RuntimeError("AI service not initialized. Call setup_ai_service() first.")
-    logger.info('🤖 Sending request to OpenRouter...')
-    payload = {"model": "deepseek/deepseek-chat-v3.1:free", "messages": messages}
+    logger.info('🤖 Sending request to OpenRouter Agent...')
+    payload = {"model": "x-ai/grok-4-fast:free", "messages": messages}
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
@@ -127,8 +125,7 @@ async def get_and_format_mcp_tools() -> List[Dict[str, Any]]:
                 "function": {
                     "name": tool.name,
                     "description": tool.description,
-                    # FINAL FIX: Call schema as a method with ()
-                    "parameters": tool.schema(),
+                    "parameters": tool.model_json_schema(),
                 }
             })
         logger.info(f"✅ Found and formatted {len(formatted_tools)} tools.")

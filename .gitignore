@@ -22,6 +22,7 @@ env/
 
 # --- Secrets ---
 # dotenv file with API keys (keep out of git)
+.env
 *.env
 !.env.example
 

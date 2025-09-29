@@ -1,0 +1,1 @@
+# TELEGRAM BOT made with python + openrouter AI agent + py MCP server @ fastmcp.cloud
