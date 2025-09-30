@@ -20,26 +20,14 @@ from ai_services import (
     get_and_format_mcp_tools,
     close_mcp_client,
     mcp_call_tool,
+    pydantic_json_default,
     SYSTEM_PROMPT,
 )
 
-# FIX 1: Custom JSON Serializer for Pydantic/FastMCP Objects
-def pydantic_json_default(obj):
-    """Converts a Pydantic object or custom class instance to a serializable dictionary or string."""
-    if hasattr(obj, 'model_dump'):
-        # Pydantic V2 serialization
-        return obj.model_dump()
-    if hasattr(obj, 'dict'):
-        # Pydantic V1 serialization (fallback)
-        return obj.dict()
-    
-    # CRITICAL FALLBACK: If it's still a non-basic object, convert it to a string.
-    # This prevents the TypeError from crashing the program loop.
-    if not isinstance(obj, (dict, list, str, int, float, bool, type(None))):
-         return str(obj) 
-    
-    # If all else fails, raise the original error for standard json types
-    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+from post_handler import (
+    handle_post_execution_reply,
+    handle_post_confirmation_request,
+)
 
 async def start_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -69,6 +57,15 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- END NEW ID EXTRACTION ---
 
     print(f'🧠 Processing agent request for chat {chat_id}: "{text}"')
+
+    # --- CRITICAL HOST-SIDE EXECUTION LOGIC (Turn 2) ---
+    # DELEGATED: If the user says 'Y', the new function handles the retrieval 
+    # and execution of the pending POST payload.
+    if text.strip().upper() == 'Y':
+        if await handle_post_execution_reply(update, context):
+            return # Exit if execution was handled by the host
+    
+    # If not 'Y' or 'Y' failed to trigger host-side execution, proceed to LLM
     try:
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
@@ -173,10 +170,19 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "content": f"Error executing tool {function_name}: {e}",
                     })
         
+        # --- FINAL ANSWER PROCESSING (Turn 1: Where we extract the payload) ---
+        # DELEGATED: Check for the hidden JSON payload and display the confirmation request.
         final_answer = messages[-1].get('content')
 
         if final_answer:
-            await message.reply_text(final_answer)
+            payload_found, display_answer = handle_post_confirmation_request(final_answer, context)
+            
+            # Display the result (clean confirmation message or standard LLM text)
+            await message.reply_text(display_answer)
+            
+            if payload_found:
+                return # Exit if a confirmation is pending (payload was found)
+            
         else:
             await message.reply_text("Sorry, I couldn't come up with a response.")
 
