@@ -114,11 +114,11 @@ _SERVER_STARTED = False
 def start_socketio_server():
     global _SERVER_STARTED
     if _SERVER_STARTED:
-        print("ℹ️ Socket.IO server already started; skipping duplicate start.")
+        print("Socket.IO server already started; skipping duplicate start.")
         return
     _SERVER_STARTED = True
     port = int(os.getenv("PORT", "5055"))
     host = "0.0.0.0"
     print(f"🌐 Socket.IO binding on {host}:{port} (origins={_ALLOWED_ORIGINS})")
     # Critical inside thread: disable reloader
-    socketio.run(app, host=host, port=port, use_reloader=False)
+    socketio.run(app, host=host, port=port, use_reloader=False, allow_unsafe_werkzeug=True)
