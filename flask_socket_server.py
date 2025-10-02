@@ -22,6 +22,7 @@ socketio = SocketIO(
     cors_allowed_origins=_ALLOWED_ORIGINS,
     ping_interval=25,
     ping_timeout=60,
+    async_mode="threading",
 )
 
 # Core brain shared here too
@@ -78,11 +79,11 @@ def on_send_message(data):
             display_text, awaiting = asyncio.run(chat_service.handle(user_state, text.strip()))
             print(f"🤖 done handle sid={sid}, awaiting={awaiting}")
             socketio.emit("status", {"typing": False}, to=sid)
-            socketio.emit("message", {"text": display_text, "awaiting": awaiting}, to=sid)
+            socketio.emit("bot_message", {"text": display_text, "awaiting": awaiting}, to=sid)
         except Exception as e:
             print(f"💥 worker error sid={sid}: {e}")
             socketio.emit("status", {"typing": False}, to=sid)
-            socketio.emit("error", {"message": f"server error: {e}"}, to=sid)
+            socketio.emit("server_error", {"message": f"server error: {e}"}, to=sid)
 
     socketio.start_background_task(_work)
 
@@ -100,10 +101,10 @@ def on_confirm_post():
             )
             response_text = asyncio.run(chat_service.confirm_post(user_state))
             socketio.emit("status", {"typing": False}, to=sid)
-            socketio.emit("message", {"text": response_text}, to=sid)
+            socketio.emit("bot_message", {"text": response_text}, to=sid)
         except Exception as e:
             socketio.emit("status", {"typing": False}, to=sid)
-            socketio.emit("error", {"message": f"server error: {e}"}, to=sid)
+            socketio.emit("server_error", {"message": f"server error: {e}"}, to=sid)
 
     socketio.start_background_task(_work)
 

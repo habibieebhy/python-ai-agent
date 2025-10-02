@@ -48,7 +48,7 @@ def _rescue_id(text: str) -> int | None:
 
 # ---------- Handlers ----------
 async def start_command_handler(update: Update, _: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hello. I’m online. Ask me anything.")
+    await update.message.reply_text("Hello. I'm online. Ask me anything.")
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -90,16 +90,13 @@ async def post_init_setup(app: Application):
     # Share tools with Socket.IO adapter too
     set_tools_cache(tools)
 
-# ---------- Bootstrapping ----------
-def _start_socketio_in_thread():
-    print("🌐 Starting Socket.IO server thread...")
-    t = threading.Thread(target=start_socketio_server, daemon=True)
-    t.start()
-    print("✅ Socket.IO server thread started.")
-    return t
-
-def main():
-    print("🚀 Booting unified runner...")
+# ---------- Public entrypoint for run.py ----------
+def start_telegram_bot():
+    """
+    Start the Telegram bot in the CURRENT THREAD.
+    Intended to be called by run.py, while the web server runs on the main thread.
+    """
+    print("🤖 Booting Telegram bot worker...")
     load_dotenv()
 
     # Prepare OpenRouter HTTP session once
@@ -109,10 +106,10 @@ def main():
     if not token:
         raise ValueError("FATAL: TELEGRAM_BOT_TOKEN is not set.")
 
-    # Start Socket.IO server alongside Telegram bot
-    _start_socketio_in_thread()
+    # Create and set an explicit event loop to silence the deprecation warning
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
-    # Telegram application
     app_builder = Application.builder().token(token)
     app_builder.post_init(post_init_setup)
     app = app_builder.build()
@@ -120,18 +117,19 @@ def main():
     app.add_handler(CommandHandler("start", start_command_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
+    print("✅ Telegram Bot is polling for messages...")
     try:
-        print("✅ Telegram Bot is polling for messages...")
-        app.run_polling()
+        
+        app.run_polling(stop_signals=None)
     finally:
         # Clean shutdown of MCP client
         try:
-            asyncio.run(close_mcp_client())
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
             loop.run_until_complete(close_mcp_client())
-            loop.close()
-        print("🛑 Shutdown complete.")
+        except Exception:
+            pass
+        # Don't print scary "Shutdown complete" lines on every redeploy/restart
 
+# ---------- Legacy standalone mode (optional for local dev) ----------
 if __name__ == "__main__":
-    main()
+    # Standalone: you can still run this file directly for local testing.
+    start_telegram_bot()
