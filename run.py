@@ -1,4 +1,7 @@
 # run.py
+import eventlet
+eventlet.monkey_patch()
+
 import threading
 from flask_socket_server import app, socketio
 from telegram_bot import start_telegram_bot

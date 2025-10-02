@@ -22,7 +22,7 @@ socketio = SocketIO(
     cors_allowed_origins=_ALLOWED_ORIGINS,
     ping_interval=25,
     ping_timeout=60,
-    async_mode="threading",
+    async_mode="eventlet",
 )
 
 # Core brain shared here too
