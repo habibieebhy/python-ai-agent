@@ -1,231 +1,137 @@
 # telegram_bot.py
 import os
-import json
 import re
+import json
 import asyncio
+import threading
 from dotenv import load_dotenv
+
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
 from telegram.constants import ChatAction
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 from ai_services import (
     setup_ai_service,
-    get_ai_completion,
     get_and_format_mcp_tools,
     close_mcp_client,
-    mcp_call_tool,
-    pydantic_json_default,
     SYSTEM_PROMPT,
+    pydantic_json_default,  # still handy for debug prints
 )
 
-from post_handler import (
-    handle_post_execution_reply,
-    handle_post_confirmation_request,
-)
+# Core brain shared by all transports
+from chat_service import ChatService
 
-async def start_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        'Hello! I am an AI assistant powered by OpenRouter. I can now use tools to help you. Ask me anything.'
+# Socket.IO server starter and tools cache setter
+from flask_socket_server import start_socketio_server, set_tools_cache
+
+chat_service = ChatService()
+
+# ---------- Utilities ----------
+def _ensure_history_store(context: ContextTypes.DEFAULT_TYPE) -> list[dict]:
+    msgs = context.user_data.get("messages")
+    if not msgs:
+        msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+        context.user_data["messages"] = msgs
+    return msgs
+
+def _rescue_id(text: str) -> int | None:
+    m = re.search(
+        r"(?:user|dealer|report|dvr|tvr|sales\s*order|sales|order|id)\s*#?\s*(\d+)|(\d+)\s*$",
+        text, re.IGNORECASE
     )
+    if not m:
+        return None
+    try:
+        return int(m.group(1) or m.group(2))
+    except ValueError:
+        return None
+
+# ---------- Handlers ----------
+async def start_command_handler(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Hello. I’m online. Ask me anything.")
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     chat_id = message.chat_id
-    text = message.text
-
-    if not text:
+    text = message.text or ""
+    if not text.strip():
         return
-    
-    # --- NEW: Aggressive ID Extraction from User Message Text ---
-    # Look for a number that follows an ID keyword or is at the end of the message.
-    rescued_id_from_text = None
-    # Regex: (user|dealer|report|order|id) followed by a number, OR a standalone number at the end
-    match = re.search(r'(?:user|dealer|report|dvr|tvr|sales order|sales|order|id)\s*#?\s*(\d+)|(\d+)\s*$', text, re.IGNORECASE)
-    if match:
-        id_str = match.group(1) or match.group(2)
-        try:
-            rescued_id_from_text = int(id_str)
-            print(f"  -> Host Rescue: Found potential ID {rescued_id_from_text} in user text.")
-        except ValueError:
-            pass
-    # --- END NEW ID EXTRACTION ---
 
-    print(f'🧠 Processing agent request for chat {chat_id}: "{text}"')
-
-    # --- CRITICAL HOST-SIDE EXECUTION LOGIC (Turn 2) ---
-    # DELEGATED: If the user says 'Y', the new function handles the retrieval 
-    # and execution of the pending POST payload.
-    if text.strip().upper() == 'Y':
-        if await handle_post_execution_reply(update, context):
-            return # Exit if execution was handled by the host
-    
-    # If not 'Y' or 'Y' failed to trigger host-side execution, proceed to LLM
-    try:
+    # Turn-2: if user replied 'Y', try executing stored POST
+    if text.strip().upper() == "Y" and context.user_data.get("pending_tool_payload"):
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        response = await chat_service.confirm_post(context.user_data)
+        await message.reply_text(response)
+        return
 
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": text},
-        ]
-        
-        tools = context.bot_data.get('mcp_tools', [])
+    # Normal chat turn
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
-        while True:
-            ai_response_message = await asyncio.to_thread(get_ai_completion, messages, tools)
-            
-            if not ai_response_message:
-                raise ValueError("Failed to get a response from the AI.")
+    # Preload tools into user_state once
+    context.user_data.setdefault("mcp_tools", context.bot_data.get("mcp_tools", []))
+    _ensure_history_store(context)
 
-            messages.append(ai_response_message)
-            tool_calls = ai_response_message.get("tool_calls")
+    # Optional host-side ID rescue
+    rescued = _rescue_id(text)
+    if rescued is not None:
+        text = f"{text} [Host System Note: Relevant ID rescued from user text: {rescued}]"
 
-            if not tool_calls:
-                break
+    # Ask the core to handle the message
+    display_text, awaiting_confirmation = await chat_service.handle(context.user_data, text)
 
-            for tool_call in tool_calls:
-                function_name = tool_call['function']['name']
-                try:
-                    function_args = json.loads(tool_call['function']['arguments'])
+    # Telegram just shows the cleaned text. If awaiting_confirmation == True,
+    # the user can reply 'Y' next message to execute the stored POST.
+    await message.reply_text(display_text)
 
-                     # The LLM sometimes hallucinates metadata into the arguments.
-                    CLEAN_KEYS = [
-                        'inputSchema', 
-                        'name', 
-                        'parameters',
-                        'title',         
-                        'description',   
-                        'outputSchema',  
-                        'icons',         
-                        '_meta',         
-                        'annotations',
-                        'required',    
-                    ]
-                    # This filters out the LLM's hallucinated metadata and None values.
-                    cleaned_args = {
-                        k: v for k, v in function_args.items() 
-                        if k not in CLEAN_KEYS and v is not None
-                    }
-                    
-                    # --- ULTIMATE CRITICAL ID RESCUE LOGIC ---
-                    if function_name in ['get_user_by_id', 'get_dealer_by_id', 
-                                         'get_dvr_report_by_id', 'get_tvr_report_by_id', 'get_sales_order_by_id']:
-                        
-                        # If the necessary ID is missing, attempt all levels of rescue.
-                        if not cleaned_args:
-                            
-                            # Determine the correct key name based on the function
-                            rescue_key = None
-                            if 'user_by_id' in function_name: rescue_key = 'user_id'
-                            elif 'dealer_by_id' in function_name: rescue_key = 'dealer_id'
-                            elif 'dvr_report_by_id' in function_name: rescue_key = 'reportId'
-                            elif 'tvr_report_by_id' in function_name: rescue_key = 'reportId'
-                            elif 'sales_order_by_id' in function_name: rescue_key = 'orderId'
-                            
-                            id_value_from_args = None
-                            
-                            # Rescue attempt 1: Search raw LLM args for any integer
-                            if function_args:
-                                for v in function_args.values():
-                                    if isinstance(v, int):
-                                        id_value_from_args = v
-                                        break
-                            
-                            # Final Rescue attempt 2: Use the ID extracted from the original user text
-                            final_id_value = id_value_from_args or rescued_id_from_text
-
-                            if final_id_value is not None and rescue_key is not None:
-                                cleaned_args[rescue_key] = final_id_value
-                                print(f"  -> Final ID Injection: Using ID {final_id_value} from {'raw LLM args' if id_value_from_args else 'user message text'}.")
-                            
-                        # If the necessary ID is STILL missing (after all rescues), fail and instruct the LLM
-                        if not cleaned_args:
-                            print(f"  -> Tool call failed: LLM failed to provide the required ID for {function_name}.")
-                            # This will be sent back to the LLM to try one last time.
-                            raise ValueError(f"Required ID parameter missing. Please extract the ID from the user's message and provide it as an integer.")
-                    # --- END ULTIMATE CRITICAL ID RESCUE LOGIC ---
-                    
-                    print(f"  -> Calling tool: {function_name} with args {cleaned_args}")
-                    
-                    # This handles the custom object returned by mcp_call_tool (fastmcp.Client.call_tool)
-                    tool_result = await mcp_call_tool(function_name, cleaned_args)
-                    
-                    # FIX 2: Use the custom default serializer to handle Pydantic objects.
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call['id'],
-                        "content": json.dumps(tool_result, default=pydantic_json_default),
-                    })
-
-                except Exception as e:
-                    print(f"  -> Tool call failed: {e}")
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call['id'],
-                        "content": f"Error executing tool {function_name}: {e}",
-                    })
-        
-        # --- FINAL ANSWER PROCESSING (Turn 1: Where we extract the payload) ---
-        # DELEGATED: Check for the hidden JSON payload and display the confirmation request.
-        final_answer = messages[-1].get('content')
-
-        if final_answer:
-            payload_found, display_answer = handle_post_confirmation_request(final_answer, context)
-            
-            # Display the result (clean confirmation message or standard LLM text)
-            await message.reply_text(display_answer)
-            
-            if payload_found:
-                return # Exit if a confirmation is pending (payload was found)
-            
-        else:
-            await message.reply_text("Sorry, I couldn't come up with a response.")
-
-    except Exception as error:
-        print(f"💥 Failed to get AI response for chat {chat_id}: {error}")
-        await message.reply_text(
-            "Sorry, I'm having trouble connecting to my brain right now. Please try again later."
-        )
-
-# FIX: Create a proper async function for post_init
 async def post_init_setup(app: Application):
-    """
-    This function runs once after the bot is initialized.
-    It fetches the tools and stores them in the bot's data context.
-    """
-    app.bot_data['mcp_tools'] = await get_and_format_mcp_tools()
+    # Fetch MCP tools once and cache in bot_data
+    tools = await get_and_format_mcp_tools()
+    app.bot_data["mcp_tools"] = tools
+    # Share tools with Socket.IO adapter too
+    set_tools_cache(tools)
+
+# ---------- Bootstrapping ----------
+def _start_socketio_in_thread():
+    print("🌐 Starting Socket.IO server thread...")
+    t = threading.Thread(target=start_socketio_server, daemon=True)
+    t.start()
+    print("✅ Socket.IO server thread started.")
+    return t
 
 def main():
-    print("🚀 Starting agent bot...")
+    print("🚀 Booting unified runner...")
     load_dotenv()
-    
+
+    # Prepare OpenRouter HTTP session once
     setup_ai_service()
-    
+
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        raise ValueError("FATAL ERROR: TELEGRAM_BOT_TOKEN is not set in your .env file.")
+        raise ValueError("FATAL: TELEGRAM_BOT_TOKEN is not set.")
 
+    # Start Socket.IO server alongside Telegram bot
+    _start_socketio_in_thread()
+
+    # Telegram application
     app_builder = Application.builder().token(token)
-    
-    # FIX: Pass the new async setup function to post_init
     app_builder.post_init(post_init_setup)
-    
     app = app_builder.build()
 
     app.add_handler(CommandHandler("start", start_command_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
     try:
-        print(f"✅ Telegram Bot is polling for messages...")
+        print("✅ Telegram Bot is polling for messages...")
         app.run_polling()
     finally:
-        print("🛑 Shutting down. Closing MCP client...")
-        asyncio.run(close_mcp_client())
+        # Clean shutdown of MCP client
+        try:
+            asyncio.run(close_mcp_client())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(close_mcp_client())
+            loop.close()
+        print("🛑 Shutdown complete.")
 
 if __name__ == "__main__":
     main()
