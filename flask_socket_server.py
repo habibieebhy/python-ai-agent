@@ -23,6 +23,7 @@ socketio = SocketIO(
     ping_interval=25,
     ping_timeout=60,
     async_mode="eventlet",
+    path="/socket.io"
 )
 
 # Core brain shared here too
@@ -121,4 +122,4 @@ def start_socketio_server():
     host = "0.0.0.0"
     print(f"🌐 Socket.IO binding on {host}:{port} (origins={_ALLOWED_ORIGINS})")
     # Critical inside thread: disable reloader
-    socketio.run(app, host=host, port=port, use_reloader=False, allow_unsafe_werkzeug=True)
+    socketio.run(app, host=host, port=port, use_reloader=False)
