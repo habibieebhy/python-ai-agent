@@ -79,7 +79,7 @@ def get_ai_completion(messages: List[Dict[str, Any]], tools: Optional[List[Dict[
     global _session
     if _session is None: raise RuntimeError("AI service not initialized. Call setup_ai_service() first.")
     logger.info('🤖 Sending request to OpenRouter Agent...')
-    payload = {"model": "google/gemini-2.0-flash-exp:free", "messages": messages}
+    payload = {"model": "nvidia/nemotron-nano-9b-v2:free", "messages": messages}
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
