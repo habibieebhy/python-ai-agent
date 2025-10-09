@@ -1,11 +1,10 @@
 # run.py
 import eventlet
-eventlet.monkey_patch()
+eventlet.monkey_patch(thread=False, os=False, subprocess=False)
 
-import threading
 from flask_socket_server import app, socketio
 from telegram_bot import start_telegram_bot
-
+import threading
 # Start Telegram immediately on import (so Gunicorn workers launch it)
 t = threading.Thread(target=start_telegram_bot, daemon=True)
 t.start()

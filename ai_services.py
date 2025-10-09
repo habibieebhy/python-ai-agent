@@ -4,10 +4,13 @@ import json
 import logging
 import asyncio
 from typing import Optional, Any, Dict, List
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+# import requests # COMMENTED: Not needed for native OpenAI SDK
+# from requests.adapters import HTTPAdapter # COMMENTED: Not needed for native OpenAI SDK
+# from urllib3.util.retry import Retry # COMMENTED: Not needed for native OpenAI SDK
 from dotenv import load_dotenv
+
+from openai import OpenAI 
+
 from fastmcp import Client
 from ai_prompt_helper import get_system_prompt # prompt helper function
 
@@ -15,10 +18,18 @@ load_dotenv()
 
 SYSTEM_PROMPT = get_system_prompt() # use the imported Prompt
 
-OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-YOUR_SITE_URL = os.getenv("YOUR_SITE_URL", "")
-YOUR_SITE_NAME = os.getenv("YOUR_SITE_NAME", "")
+# --- OLD OPENROUTER CONFIG ---
+# OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+# OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") # Use OPENAI_API_KEY instead
+# YOUR_SITE_URL = os.getenv("YOUR_SITE_URL", "")
+# YOUR_SITE_NAME = os.getenv("YOUR_SITE_NAME", "")
+# ---------------------------------------------
+
+# --- OPENAI CONFIG ---
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # Read native key
+_openai_client: Optional[OpenAI] = None # New global client instance
+# -------------------------
+
 FASTMCP_URL = os.getenv("FASTMCP_URL", "https://brixta-mycoco-mcp.fastmcp.app/mcp")
 logger = logging.getLogger("ai_services")
 if not logger.handlers:
@@ -50,59 +61,100 @@ def _safe_ascii(obj) -> str:
     except Exception:
         try: return repr(obj)
         except Exception: return "<unrepresentable>"
-_session: Optional[requests.Session] = None
 
-def _validate_and_get_key() -> str:
-    key = (OPENROUTER_API_KEY or "").strip()
-    if not key: raise RuntimeError("OPENROUTER_API_KEY missing")
-    if any(ord(ch) > 127 for ch in key): raise RuntimeError("OPENROUTER_API_KEY contains non-ASCII characters")
-    return key
+# --- OLD REQUESTS/OPENROUTER GLOBALS/HELPERS ---
+# _session: Optional[requests.Session] = None 
 
-def _build_session() -> requests.Session:
-    s = requests.Session()
-    retry = Retry(total=4, backoff_factor=0.5, status_forcelist=(429, 500, 502, 503, 504), allowed_methods=frozenset(["GET", "POST"]), raise_on_status=False)
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=50)
-    s.mount("https://", adapter)
-    s.mount("http://", adapter)
-    s.headers.update({"Authorization": f"Bearer {_validate_and_get_key()}", "HTTP-Referer": YOUR_SITE_URL, "X-Title": YOUR_SITE_NAME})
-    return s
+# def _validate_and_get_key() -> str:
+#     key = (OPENROUTER_API_KEY or "").strip()
+#     if not key: raise RuntimeError("OPENROUTER_API_KEY missing")
+#     if any(ord(ch) > 127 for ch in key): raise RuntimeError("OPENROUTER_API_KEY contains non-ASCII characters")
+#     return key
 
-def setup_ai_service() -> Dict[str, Any]:
-    global _session
-    if _session is None:
-        _session = _build_session()
-        logger.info("✅ HTTP session initialized for OpenRouter (base: %s)", OPENROUTER_BASE_URL)
-    else: logger.info("✅ AI service already initialized.")
-    return {"session": _session, "base_url": OPENROUTER_BASE_URL}
+# def _build_session() -> requests.Session:
+#     s = requests.Session()
+#     retry = Retry(total=4, backoff_factor=0.5, status_forcelist=(429, 500, 502, 503, 504), allowed_methods=frozenset(["GET", "POST"]), raise_on_status=False)
+#     adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=50)
+#     s.mount("https://", adapter)
+#     s.mount("http://", adapter)
+#     s.headers.update({"Authorization": f"Bearer {_validate_and_get_key()}", "HTTP-Referer": YOUR_SITE_URL, "X-Title": YOUR_SITE_NAME})
+#     return s
+# ------------------------------------------------------------------
+
+# --- OPENAI CLIENT SETUP ---
+
+def _ensure_openai_client() -> OpenAI:
+    """Helper to ensure the client is initialized before use."""
+    if _openai_client is None: raise RuntimeError("OpenAI client not initialized. Call setup_ai_service() first.")
+    return _openai_client
+
+def setup_ai_service():
+    """Initializes the OpenAI API client."""
+    global _openai_client
+    
+    if _openai_client is not None:
+        logger.info("✅ OpenAI service already initialized.")
+        return
+
+    # New OpenAI Client setup
+    key = (OPENAI_API_KEY or os.getenv("OPENAI_API_KEY") or "").strip()
+    if not key: 
+        logger.error("FATAL: OPENAI_API_KEY is not set.")
+        return
+
+    _openai_client = OpenAI(api_key=key)
+    logger.info("✅ OpenAI Client initialized")
+
+# --- UPDATED COMPLETION FUNCTION ---
 
 def get_ai_completion(messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
-    global _session
-    if _session is None: raise RuntimeError("AI service not initialized. Call setup_ai_service() first.")
-    logger.info('🤖 Sending request to OpenRouter Agent...')
-    payload = {"model": "nvidia/nemotron-nano-9b-v2:free", "messages": messages}
-    if tools:
-        payload["tools"] = tools
-        payload["tool_choice"] = "auto"
-    try:
-        resp = _session.post(f"{OPENROUTER_BASE_URL}/chat/completions", json=payload, timeout=30)
-        resp.encoding = "utf-8"
-        resp.raise_for_status()
-        data = resp.json()
-        choices = data.get("choices")
-        if not choices or not isinstance(choices, list): raise ValueError("Missing 'choices' in AI response")
-        message = choices[0].get("message")
-        if message is None: raise ValueError("AI response 'message' missing")
-        logger.info("✅ AI Response Received.")
-        return message
-    except requests.RequestException as e:
-        logger.error("💥 HTTP error: %s", _safe_ascii(e))
-        if 'resp' in locals() and getattr(resp, "text", None): logger.error("    body: %s", _safe_ascii(resp.text))
-        raise
-    except (ValueError, KeyError, IndexError) as e:
-        logger.error("💥 Parse error: %s", _safe_ascii(e))
-        if 'resp' in locals() and getattr(resp, "text", None): logger.error("    body: %s", _safe_ascii(resp.text))
-        raise
+    client = _ensure_openai_client()
+    model = "gpt-5-nano" # THE CHATGPT MODEL
     
+    logger.info(f'🤖 Sending request to OpenAI Agent ({model})...')
+    
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            # Only send tools if the list is not empty
+            tools=tools if tools else None, 
+            tool_choice="auto" if tools else "none"
+        )
+    except Exception as e:
+        logger.error(f"💥 OpenAI API Error: {e}")
+        return None
+
+    # Parse and structure the response to match the expected dict format 
+    # (compatible with the original chat_service.py parsing)
+    ai_msg = response.choices[0].message
+    
+    tool_calls_list = []
+    if ai_msg.tool_calls:
+        for tc in ai_msg.tool_calls:
+            # Reconstruct the tool_calls structure expected by the rest of the app
+            tool_calls_list.append({
+                "id": tc.id,
+                "type": tc.type,
+                "function": {
+                    "name": tc.function.name,
+                    # tc.function.arguments is already a string of JSON
+                    "arguments": tc.function.arguments, 
+                }
+            })
+            
+    # The return format must match the original: a dict with 'role', 'content', and 'tool_calls'
+    result_message = {
+        "role": ai_msg.role,
+        "content": ai_msg.content, # This will be None if a tool call is made
+        "tool_calls": tool_calls_list
+    }
+    
+    logger.info("✅ AI Response Received.")
+    return result_message
+    
+# --- MCP CLIENT FUNCTIONS (Unchanged and Correct) ---
+
 _mcp_client: Optional[Client] = None
 _mcp_lock = asyncio.Lock()
 
@@ -142,6 +194,7 @@ async def get_and_format_mcp_tools() -> List[Dict[str, Any]]:
         mcp_tools = await mcp_client.list_tools()
         formatted_tools = []
         for tool in mcp_tools:
+            # This logic is correct for converting MCP schemas to OpenAI's tool format
             formatted_tools.append({
                 "type": "function",
                 "function": {

@@ -3,6 +3,10 @@ import os
 from flask import Flask, request
 from flask_socketio import SocketIO, emit
 from dotenv import load_dotenv
+import asyncio
+import threading
+from queue import Queue
+import traceback
 
 from ai_services import SYSTEM_PROMPT, setup_ai_service
 from chat_service import ChatService
@@ -22,7 +26,7 @@ socketio = SocketIO(
     cors_allowed_origins=_ALLOWED_ORIGINS,
     ping_interval=25,
     ping_timeout=60,
-    async_mode="eventlet",
+    async_mode="threading",   # <- ditch eventlet here; stable, no monkey-patching circus
     path="/socket.io"
 )
 
@@ -40,6 +44,44 @@ def set_tools_cache(tools: list[dict]):
 
 # Ensure OpenRouter HTTP session is ready
 setup_ai_service()
+
+def _run_coro_in_fresh_loop(coro):
+    """
+    Run a coroutine in a brand-new asyncio event loop that lives ONLY
+    inside this OS thread. No cross-talk, no nested-loop drama.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        asyncio.set_event_loop(None)
+        loop.close()
+
+def _run_async_in_thread(coro):
+    """
+    Execute an async coroutine in a dedicated OS thread that owns its own event loop.
+    Blocks until the result is ready; returns value or raises exception.
+    """
+    q: Queue = Queue(maxsize=1)
+
+    def _runner():
+        try:
+            result = _run_coro_in_fresh_loop(coro)
+            q.put((True, result))
+        except BaseException as e:
+            q.put((False, e))
+
+    t = threading.Thread(target=_runner, daemon=True, name="ai-coro-worker")
+    t.start()
+    ok, payload = q.get()  # blocks until done
+    if ok:
+        return payload
+    raise payload
 
 @app.route("/")
 def health():
@@ -71,18 +113,18 @@ def on_send_message(data):
     emit("status", {"typing": True}, to=sid)
 
     def _work():
-        import asyncio
         try:
             user_state = CLIENT_STATES.setdefault(
                 sid,
                 {"messages":[{"role":"system","content":SYSTEM_PROMPT}], "mcp_tools": TOOLS_CACHE}
             )
-            display_text, awaiting = asyncio.run(chat_service.handle(user_state, text.strip()))
-            print(f"🤖 done handle sid={sid}, awaiting={awaiting}")
+            display_text, awaiting = _run_async_in_thread(
+                chat_service.handle(user_state, text.strip())
+            )
             socketio.emit("status", {"typing": False}, to=sid)
             socketio.emit("bot_message", {"text": display_text, "awaiting": awaiting}, to=sid)
         except Exception as e:
-            print(f"💥 worker error sid={sid}: {e}")
+            print(f"💥 worker error sid={sid}: {e}\n{traceback.format_exc()}")
             socketio.emit("status", {"typing": False}, to=sid)
             socketio.emit("server_error", {"message": f"server error: {e}"}, to=sid)
 
@@ -94,13 +136,14 @@ def on_confirm_post():
     emit("status", {"typing": True}, to=sid)
 
     def _work():
-        import asyncio
         try:
             user_state = CLIENT_STATES.setdefault(
                 sid,
                 {"messages":[{"role":"system","content":SYSTEM_PROMPT}], "mcp_tools": TOOLS_CACHE}
             )
-            response_text = asyncio.run(chat_service.confirm_post(user_state))
+            response_text = _run_async_in_thread(
+                chat_service.confirm_post(user_state)
+            )
             socketio.emit("status", {"typing": False}, to=sid)
             socketio.emit("bot_message", {"text": response_text}, to=sid)
         except Exception as e:
@@ -121,5 +164,5 @@ def start_socketio_server():
     port = int(os.getenv("PORT", "5055"))
     host = "0.0.0.0"
     print(f"🌐 Socket.IO binding on {host}:{port} (origins={_ALLOWED_ORIGINS})")
-    # Critical inside thread: disable reloader
+    # Dev-only runner; don't use under Gunicorn
     socketio.run(app, host=host, port=port, use_reloader=False)
