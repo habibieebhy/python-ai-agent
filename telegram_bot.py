@@ -6,7 +6,7 @@ import asyncio
 import threading
 from dotenv import load_dotenv
 
-from telegram import Update
+from telegram import Update, Bot
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -21,8 +21,12 @@ from ai_services import (
 # Core brain shared by all transports
 from chat_service import ChatService
 
-# Socket.IO server starter and tools cache setter
-from flask_socket_server import start_socketio_server, set_tools_cache
+try:
+    from flask_socket_server import set_tools_cache, socketio as socketio_server
+except Exception:
+    # keep the file import-safe if you run telegram_bot.py by itself
+    socketio_server = None
+    def set_tools_cache(_): pass
 
 chat_service = ChatService()
 
@@ -46,6 +50,24 @@ def _rescue_id(text: str) -> int | None:
     except ValueError:
         return None
 
+# NO AI sales order helper
+async def send_message_to_telegram(chat_id: int | str, text: str, token: str | None = None):
+    """
+    Utility to send a plain message to a telegram chat id.
+    Useful for web -> telegram forwards. Non-blocking wrapper.
+    """
+    tkn = token or os.getenv("SALES_ORDER_BOT_TOKEN")
+    if not tkn:
+        print("send_message_to_telegram: no token available")
+        return False
+    try:
+        bot = Bot(token=tkn)
+        await bot.send_message(chat_id=chat_id, text=text)
+        return True
+    except Exception as e:
+        print(f"send_message_to_telegram: failed to send to {chat_id}: {e}")
+        return False
+
 # ---------- Handlers ----------
 async def start_command_handler(update: Update, _: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Hello. I'm online. Ask me anything.")
@@ -56,6 +78,24 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = message.text or ""
     if not text.strip():
         return
+    
+    # NO AI section here ---------------------------------------
+    # Emit to web clients that a human/telegram bot has sent something
+    payload = {
+        "from_chat_id": chat_id,
+        "from_name": (message.from_user.full_name if message.from_user else str(chat_id)),
+        "text": text,
+        "timestamp": message.date.isoformat() if message.date else None,
+    }
+    try:
+        if socketio_server:
+            socketio_server.emit("human_message", payload)
+        else:
+            # defensive: don't fail if socketio wasn't importable
+            print("socketio_server not available; skipping human_message emit")
+    except Exception as e:
+        print("failed to emit human_message to socketio:", e)
+    # NO AI section ends here ---------------------------------------------
 
     # Turn-2: if user replied 'Y', try executing stored POST
     if text.strip().upper() == "Y" and context.user_data.get("pending_tool_payload"):
